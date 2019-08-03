@@ -1,36 +1,6 @@
-/*
-    Modbus slave example.
-
-    Control and Read Arduino I/Os using Modbus serial connection.
-    
-    This sketch show how to use the callback vector for reading and
-    controleing Arduino I/Os.
-    
-    * Control digital pins mode using holding registers 0 .. 13.
-    * Controls digital output pins as modbus coils.
-    * Reads digital inputs state as discreet inputs.
-    * Reads analog inputs as input registers.
-    * Write and Read EEPROM as holding registers.
-
-    The circuit: ( see: ./extras/ModbusSetch.pdf )
-    * An Arduino.
-    * 2 x LEDs, with 220 ohm resistors in series.
-    * A switch connected to a digital input pin.
-    * A potentiometer connected to an analog input pin.
-    * A RS485 module (Optional) connected to RX/TX and a digital control pin.
-
-    Created 8 12 2015
-    By Yaacov Zamir
-
-    https://github.com/yaacov/ArduinoModbusSlave
-
-*/
-
 #include <EEPROM.h>
 #include "ModbusSlave.h"
-
-#define PIN_MODE_INPUT  0
-#define PIN_MODE_OUTPUT 1
+#include "pin.h"
 
 const int DEFAULT_SLAVE_ID = 1;
 const int CTRL_PIN         = 2;
@@ -41,9 +11,13 @@ const int ADDR_CFG_PIN_1   = 4;
 const int ADDR_CFG_PIN_2   = 5;
 const int ADDR_CFG_PIN_3   = 6;
 
+const int START_CONFIGURABLE_PIN = 7;
+const int TOTAL_CONFIGURABLE_PIN = 7;
+
 const int EEPROM_SIZE      = 1024; // Bytes
 
 Modbus slave(DEFAULT_SLAVE_ID, CTRL_PIN);
+Pin    pinConfig[TOTAL_CONFIGURABLE_PIN];
 
 /******************************************************************************/
 
@@ -52,11 +26,18 @@ void configurePinMode(uint16_t pinIndex,
     if (CTRL_PIN == pinIndex) {
         return;
     }
-    switch (value) {
-        case PIN_MODE_INPUT:  pinMode(pinIndex, INPUT);
+    unsigned char mode = value & 1;
+    pinConfig[pinIndex].number = pinIndex;
+    pinConfig[pinIndex].mode   = mode;
+    pinConfig[pinIndex].timer  = 3;//value & 0xFE;
+    pinConfig[pinIndex].timerActivated = 0;
+    
+    switch(mode) {
+        case PIN_MODE_INPUT:  pinMode(START_CONFIGURABLE_PIN + pinIndex, INPUT);
                               break;
-        case PIN_MODE_OUTPUT: pinMode(pinIndex, OUTPUT);
+        case PIN_MODE_OUTPUT: pinMode(START_CONFIGURABLE_PIN + pinIndex, OUTPUT);
                               break;
+        default:              pinMode(START_CONFIGURABLE_PIN + pinIndex, OUTPUT);
     }
 }
 
@@ -87,6 +68,25 @@ readDigitalIn(uint8_t  functionCode,
 
 /******************************************************************************/
 
+void
+activateTimer(unsigned char pin) {
+    pinConfig[pin].timerActivated = 1;
+    pinConfig[pin].internalTimer  = millis();
+}
+
+/******************************************************************************/
+
+unsigned char 
+timerIsOut(unsigned char pin) {
+    if (millis() - pinConfig[pin].internalTimer > 
+        pinConfig[pin].internalTimer * 1000) { 
+        return 1;
+    }
+    return 0;
+}
+
+/******************************************************************************/
+
 /* Handle Force Single Coil (FC=05) and Force Multiple Coils (FC=15)
  * set digital output pins (coils).
  */
@@ -95,15 +95,20 @@ writeDigitalOut(uint8_t  function,
                 uint16_t address, 
                 uint16_t length) {
     (void)function;
-    (void)address;
     // set digital pin state(s).
     for (int currentCoilIndex = 0; currentCoilIndex < length; currentCoilIndex++) {
-        digitalWrite(address + currentCoilIndex, slave.readCoilFromBuffer(currentCoilIndex));
+        int coilStatus = slave.readCoilFromBuffer(currentCoilIndex);
+        digitalWrite(address + currentCoilIndex, coilStatus);
+        
+        if (1 == coilStatus) {
+            activateTimer(0);
+        }
     }
     return STATUS_OK;
 }
 
-/*****************************************************************************************/
+/******************************************************************************/
+
 /* Handle Write Holding Register(s) (FC=06, FC=16)
  * write data into eeprom.
  */
@@ -153,11 +158,9 @@ readMemory(uint8_t  function,
         readAnalogIn(address, length);
         return STATUS_OK;
     }
-    
     if (address >= (EEPROM_SIZE/2)-1) { // SIZE/2 = convert in 16 bit length
       return STATUS_ILLEGAL_DATA_ADDRESS;
     }
-
     uint16_t value;
     for (int registerIndex = 0; registerIndex < length; registerIndex++) {
         EEPROM.get((address + registerIndex) * 2, value);
@@ -168,24 +171,43 @@ readMemory(uint8_t  function,
 
 /******************************************************************************/
 
+void checkTimers() {
+    for (uint16_t pinIndex = 0; 
+         pinIndex < TOTAL_CONFIGURABLE_PIN; 
+         pinIndex++) {
+        if (0 >= pinConfig[pinIndex].timer || 
+            0 == pinConfig[pinIndex].timerActivated) { // no timer for this pin !
+            continue;
+        }
+        if (1 == timerIsOut(pinIndex)) {
+            pinConfig[pinIndex].timerActivated = 0;
+            pinConfig[pinIndex].internalTimer  = 0;
+            //digitalWrite(START_CONFIGURABLE_PIN + pinIndex, 1);
+            digitalWrite(8, 0);
+        }
+    }
+}
+
+/******************************************************************************/
+
 void setup() {
     pinMode(ADDR_CFG_PIN_0, INPUT);
     pinMode(ADDR_CFG_PIN_1, INPUT);
     pinMode(ADDR_CFG_PIN_2, INPUT);
     pinMode(ADDR_CFG_PIN_3, INPUT);
-    // Read 3 pins (from dipswitch) for address configuration
+    // Read 4 pins (from dipswitch) for address configuration
     int modbusAddr =  (digitalRead(ADDR_CFG_PIN_0) & 0x1) | 
                      ((digitalRead(ADDR_CFG_PIN_1) & 0x1) << 1) |
                      ((digitalRead(ADDR_CFG_PIN_2) & 0x1) << 2) |
                      ((digitalRead(ADDR_CFG_PIN_3) & 0x1) << 3);
     slave.setSlaveId(modbusAddr);
 
-    for (uint16_t pinIndex = 7; pinIndex <= 13; pinIndex++) {
-        uint16_t mode = EEPROM.read(pinIndex * 2);
-        if (PIN_MODE_OUTPUT != mode && PIN_MODE_INPUT != mode) {
-            mode = PIN_MODE_OUTPUT;
-        }
-        configurePinMode(pinIndex, mode); //2 for 16 bit registers
+    unsigned char relativePin = 0;
+    for (uint16_t pinIndex = START_CONFIGURABLE_PIN; 
+         pinIndex < START_CONFIGURABLE_PIN + TOTAL_CONFIGURABLE_PIN; 
+         pinIndex++, relativePin++) {
+        uint16_t pin = EEPROM.read(pinIndex * 2); //2 for 16 bit registers
+        configurePinMode(relativePin, pin); 
     }
     // RS485 control pin must be output
     pinMode(CTRL_PIN, OUTPUT);
@@ -209,6 +231,7 @@ void loop() {
      * call the user handler function.
      */ 
     slave.poll();
+    checkTimers();
 }
 
 /******************************************************************************/
