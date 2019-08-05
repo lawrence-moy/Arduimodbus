@@ -7,8 +7,8 @@ enum {
 struct Pin {
   unsigned char number;
   unsigned char mode;
-  unsigned char timer;
+  unsigned long timer;
   unsigned char timerActivated;
-  unsigned char internalTimer;
+  unsigned long internalTimer;
 };
 

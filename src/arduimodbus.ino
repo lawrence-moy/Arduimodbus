@@ -29,8 +29,9 @@ void configurePinMode(uint16_t pinIndex,
     unsigned char mode = value & 1;
     pinConfig[pinIndex].number = pinIndex;
     pinConfig[pinIndex].mode   = mode;
-    pinConfig[pinIndex].timer  = 3;//value & 0xFE;
+    pinConfig[pinIndex].timer  = ((value & 0xFE) >> 1) * 1000;
     pinConfig[pinIndex].timerActivated = 0;
+    pinConfig[pinIndex].internalTimer  = millis();
     
     switch(mode) {
         case PIN_MODE_INPUT:  pinMode(START_CONFIGURABLE_PIN + pinIndex, INPUT);
@@ -78,8 +79,8 @@ activateTimer(unsigned char pin) {
 
 unsigned char 
 timerIsOut(unsigned char pin) {
-    if (millis() - pinConfig[pin].internalTimer > 
-        pinConfig[pin].internalTimer * 1000) { 
+    if ((millis() - pinConfig[pin].internalTimer) >=
+         pinConfig[pin].timer) {     
         return 1;
     }
     return 0;
@@ -100,8 +101,8 @@ writeDigitalOut(uint8_t  function,
         int coilStatus = slave.readCoilFromBuffer(currentCoilIndex);
         digitalWrite(address + currentCoilIndex, coilStatus);
         
-        if (1 == coilStatus) {
-            activateTimer(0);
+        if (0 == coilStatus) {
+            activateTimer(START_CONFIGURABLE_PIN - address);
         }
     }
     return STATUS_OK;
@@ -179,11 +180,12 @@ void checkTimers() {
             0 == pinConfig[pinIndex].timerActivated) { // no timer for this pin !
             continue;
         }
+        
         if (1 == timerIsOut(pinIndex)) {
             pinConfig[pinIndex].timerActivated = 0;
-            pinConfig[pinIndex].internalTimer  = 0;
-            //digitalWrite(START_CONFIGURABLE_PIN + pinIndex, 1);
-            digitalWrite(8, 0);
+            pinConfig[pinIndex].internalTimer  = millis();
+            digitalWrite(START_CONFIGURABLE_PIN + pinIndex, 
+                         !digitalRead(START_CONFIGURABLE_PIN + pinIndex));
         }
     }
 }
