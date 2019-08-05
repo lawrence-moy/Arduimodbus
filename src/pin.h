@@ -6,6 +6,7 @@ enum {
 
 struct Pin {
   unsigned char number;
+  unsigned char firstState;
   unsigned char mode;
   unsigned long timer;
   unsigned char timerActivated;
